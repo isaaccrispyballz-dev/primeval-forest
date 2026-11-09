@@ -153,7 +153,7 @@ static func tree_kinds() -> Array[Dictionary]:
 	var pale_bark := mat("ffffff", true)
 	var needles := mat("ffffff", true)
 	var leaves := mat("ffffff", true)
-	var stump := mat("7a5836")
+	var stump := mat("5e4630")
 	return [
 		{   # tall pine: dark trunk, four shaggy needle layers
 			"name": "pine", "weight": 0.6, "radius": 0.3, "trunk_h": 5.0,

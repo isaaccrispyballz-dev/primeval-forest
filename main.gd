@@ -53,7 +53,6 @@ var msg_t := 0.0
 var chop_cooldown := 0.0
 var prev_tip := Vector3.ZERO
 var snapped := false
-var prev_a := false
 var yaw := 0.0
 var pitch := 0.0
 var swing := 0.0
@@ -61,6 +60,15 @@ var velocity := Vector3.ZERO
 var on_ground := true
 # per hand: touching, anchor (world point the hand is stuck to), prev hand pos in origin space
 var hand_state := {}
+
+var effects: Effects
+var building: Building
+var journal: Journal
+var left_hand: Hand
+var right_hand: Hand
+var laser: MeshInstance3D
+var day := 1
+var prev_buttons := {}           # edge detection for controller buttons
 
 
 func _ready() -> void:
@@ -70,6 +78,15 @@ func _ready() -> void:
 	_build_player()
 	_build_trees()
 	_build_audio()
+	effects = Effects.new(self)
+	add_child(effects)
+	effects.tree_landed.connect(_on_tree_landed)
+	building = Building.new(self)
+	add_child(building)
+	building.site_completed.connect(_on_site_completed)
+	journal = Journal.new(building.BLUEPRINTS)
+	add_child(journal)
+	journal.blueprint_chosen.connect(_on_blueprint_chosen)
 	_update_hud()
 
 
@@ -194,6 +211,30 @@ func _build_player() -> void:
 	var axe := _make_axe()
 	right.add_child(axe)
 	axe_tip = axe.get_node("Tip")
+
+	# hands: palm faces the body's midline; the right one holds the axe in a fist
+	left_hand = Hand.new(true)
+	left_hand.rotation.z = PI / 2
+	left_hand.position = Vector3(0.01, 0, 0.03)
+	left.add_child(left_hand)
+	right_hand = Hand.new(false)
+	right_hand.rotation.z = -PI / 2
+	right_hand.position = Vector3(-0.01, 0, 0.03)
+	right.add_child(right_hand)
+
+	# pointer ray, shown while using the journal or placing a blueprint
+	laser = MeshInstance3D.new()
+	var lm := BoxMesh.new()
+	lm.size = Vector3(0.003, 0.003, 1.0)
+	var lmat := StandardMaterial3D.new()
+	lmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	lmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	lmat.albedo_color = Color(1.0, 0.85, 0.6, 0.6)
+	lm.material = lmat
+	laser.mesh = lm
+	laser.position.z = -0.5
+	laser.visible = false
+	right.add_child(laser)
 
 	hud_3d = Label3D.new()
 	hud_3d.pixel_size = 0.0004
@@ -365,11 +406,13 @@ func _try_hit(point: Vector3, speed: float, ctrl: XRController3D = null) -> bool
 		t.hp -= 1
 		t.shake = 0.4
 		_thunk(minf(1.0, speed / 4.0))
+		var out := Vector3(point.x - t.pos.x, 0.4, point.z - t.pos.z).normalized()
+		effects.chips(point, out)
 		if ctrl:
 			ctrl.trigger_haptic_pulse("haptic", 0.0, 0.7, 0.06, 0.0)
 		if t.hp <= 0:
 			t.felled = true
-			_drop_logs(t.pos)
+			effects.fell_tree(t, tree_kinds[t.kind], camera.global_position)
 			_say("Timber!")
 			if ctrl:
 				ctrl.trigger_haptic_pulse("haptic", 0.0, 1.0, 0.2, 0.0)
@@ -378,23 +421,28 @@ func _try_hit(point: Vector3, speed: float, ctrl: XRController3D = null) -> bool
 	return false
 
 
-func _drop_logs(at: Vector3) -> void:
+## A fallen tree leaves logs lying along the line where its trunk hit the ground.
+func _on_tree_landed(base: Vector3, dir: Vector3, length: float) -> void:
+	_thunk(1.4)
+	if xr_active:
+		right.trigger_haptic_pulse("haptic", 0.0, 1.0, 0.25, 0.0)
+	var yaw_along := atan2(-dir.z, dir.x)
 	for k in 3:
 		var l := MeshInstance3D.new()
 		l.mesh = log_mesh
-		var a := rng.randf() * TAU
-		var d := rng.randf_range(0.8, 1.6)
-		var p := Vector3(at.x + cos(a) * d, 0.0, at.z + sin(a) * d)
+		var p := base + dir * (0.9 + k * length / 3.5)
+		p += dir.cross(Vector3.UP) * rng.randf_range(-0.25, 0.25)
 		p.y = height_at(p.x, p.z) + 0.12
 		l.position = p
-		l.rotation = Vector3(0, rng.randf() * TAU, PI / 2)
+		l.rotation = Vector3(0, yaw_along + rng.randf_range(-0.2, 0.2), PI / 2)
 		add_child(l)
 		logs.append(l)
 
 
+## Quick campfire (A button): pays 5 logs and builds it instantly in front of you.
 func _place_fire() -> void:
 	if wood < WOOD_PER_FIRE:
-		_say("Need %d wood" % WOOD_PER_FIRE)
+		_say("Need %d logs" % WOOD_PER_FIRE)
 		return
 	var fwd := -camera.global_transform.basis.z
 	fwd.y = 0
@@ -409,6 +457,13 @@ func _place_fire() -> void:
 		l.position.y = 0.1
 		l.rotation = Vector3(0, k * PI / 4, PI / 2)
 		g.add_child(l)
+	add_child(g)
+	_light_fire(g)
+	wood -= WOOD_PER_FIRE
+
+
+## Adds flame, sparks and light to a campfire node.
+func _light_fire(g: Node3D) -> void:
 	var flame := MeshInstance3D.new()
 	var fm := CylinderMesh.new()
 	fm.top_radius = 0.0
@@ -427,11 +482,34 @@ func _place_fire() -> void:
 	light.omni_range = 14.0
 	light.position.y = 0.9
 	g.add_child(light)
-	add_child(g)
-	fires.append({"node": g, "flame": flame, "light": light, "fuel": 180.0})
+	var sparks := CPUParticles3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.012
+	sm.height = 0.024
+	sm.radial_segments = 4
+	sm.rings = 2
+	var smat := StandardMaterial3D.new()
+	smat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	smat.albedo_color = Color("ffc070")
+	sm.material = smat
+	sparks.mesh = sm
+	sparks.amount = 12
+	sparks.lifetime = 1.6
+	sparks.direction = Vector3.UP
+	sparks.spread = 20.0
+	sparks.initial_velocity_min = 0.6
+	sparks.initial_velocity_max = 1.4
+	sparks.gravity = Vector3(0, 0.4, 0)
+	sparks.emission_shape = CPUParticles3D.EMISSION_SHAPE_SPHERE
+	sparks.emission_sphere_radius = 0.15
+	sparks.position.y = 0.5
+	g.add_child(sparks)
+	fires.append({"node": g, "flame": flame, "light": light, "fuel": 180.0, "sparks": sparks})
 	if fires.size() > MAX_FIRES:
-		fires.pop_front().node.queue_free()
-	wood -= WOOD_PER_FIRE
+		var old: Dictionary = fires.pop_front()   # oldest fire goes out (keeps lights cheap on Quest)
+		old.light.visible = false
+		old.flame.visible = false
+		old.sparks.emitting = false
 	_say("Campfire lit")
 
 
@@ -443,6 +521,11 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		yaw -= event.relative.x * 0.0025
 		pitch = clampf(pitch - event.relative.y * 0.0025, -1.4, 1.4)
+	elif event is InputEventMouseButton and journal.is_open:
+		journal.click(event.pressed)
+	elif event is InputEventMouseButton and event.pressed and building.is_placing():
+		building.confirm_place()
+		_say("Blueprint placed. Bring logs.")
 	elif event is InputEventMouseButton and event.pressed:
 		if Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
 			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -456,6 +539,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_F:
 			_place_fire()
+		elif event.keycode == KEY_J:
+			journal.toggle()
+		elif event.keycode == KEY_X:
+			building.cancel_place()
 		elif event.keycode == KEY_ESCAPE:
 			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
@@ -465,6 +552,9 @@ func _hand_contact(p: Vector3):
 	var g := height_at(p.x, p.z)
 	if p.y < g + HAND_RADIUS:
 		return Vector3(p.x, g + HAND_RADIUS, p.z)
+	var lg := building.nearest_log(p, HAND_RADIUS)
+	if not lg.is_empty():
+		return lg.point + lg.normal * HAND_RADIUS
 	for t in trees:
 		if t.felled:
 			continue
@@ -514,8 +604,12 @@ func _arm_locomotion(dt: float) -> bool:
 	return any_touch
 
 
+func _ground_at(x: float, z: float, feet_y: float) -> float:
+	return maxf(height_at(x, z), building.floor_height(x, z, feet_y))
+
+
 func _apply_body_physics(dt: float, holding: bool) -> void:
-	var g := height_at(origin.position.x, origin.position.z)
+	var g := _ground_at(origin.position.x, origin.position.z, origin.position.y)
 	if not holding:
 		velocity.y -= GRAVITY * dt
 		origin.position += velocity * dt
@@ -541,8 +635,33 @@ func _update_vr(dt: float) -> void:
 		var rt := fwd.cross(Vector3.UP)
 		origin.position += (fwd * mv.y + rt * mv.x) * MOVE_SPEED * dt
 
-	# right stick: snap turn around the head
-	var turn := right.get_vector2("primary").x
+	_update_hands()
+	if _pressed(left, "by_button"):
+		journal.toggle()
+	var placing := building.is_placing()
+	var ray_from := right.global_position
+	var ray_dir := -right.global_transform.basis.z
+	laser.visible = journal.is_open or placing
+	if journal.is_open:
+		_place_journal(left.global_position + Vector3(0, 0.12, 0))
+		journal.point(ray_from, ray_dir)
+		if _pressed(right, "trigger_click"):
+			journal.click(true)
+		elif _released(right, "trigger_click"):
+			journal.click(false)
+	elif placing:
+		var hit = _ground_ray(ray_from, ray_dir, 8.0)
+		if hit != null:
+			building.move_ghost(hit)
+		building.ghost_yaw -= right.get_vector2("primary").x * 2.0 * dt
+		if _pressed(right, "trigger_click"):
+			building.confirm_place()
+			_say("Blueprint placed. Bring logs.")
+		elif _pressed(right, "by_button"):
+			building.cancel_place()
+
+	# right stick: snap turn around the head (not while turning a blueprint)
+	var turn := 0.0 if placing else right.get_vector2("primary").x
 	if absf(turn) > 0.7 and not snapped:
 		snapped = true
 		var ang := -signf(turn) * SNAP_ANGLE
@@ -555,11 +674,9 @@ func _update_vr(dt: float) -> void:
 	elif absf(turn) < 0.3:
 		snapped = false
 
-	# A button: campfire
-	var a := right.is_button_pressed("ax_button")
-	if a and not prev_a:
+	# A button: quick campfire
+	if _pressed(right, "ax_button"):
 		_place_fire()
-	prev_a = a
 
 	# axe swing: hit when the blade moves fast enough
 	var tip := axe_tip.global_position
@@ -580,7 +697,16 @@ func _update_desktop(dt: float) -> void:
 	if Input.is_key_pressed(KEY_S): origin.position -= fwd * sp
 	if Input.is_key_pressed(KEY_D): origin.position += rt * sp
 	if Input.is_key_pressed(KEY_A): origin.position -= rt * sp
-	origin.position.y = height_at(origin.position.x, origin.position.z)
+	origin.position.y = _ground_at(origin.position.x, origin.position.z, origin.position.y)
+	var look := -camera.global_transform.basis.z
+	if journal.is_open:
+		_place_journal(camera.global_position + look * 0.42 + Vector3(0, -0.05, 0))
+		journal.point(camera.global_position, look)
+	elif building.is_placing():
+		var hit = _ground_ray(camera.global_position, look, 8.0)
+		building.move_ghost(hit if hit != null else camera.global_position + fwd * 3.5)
+		if Input.is_key_pressed(KEY_Q): building.ghost_yaw += 1.5 * dt
+		if Input.is_key_pressed(KEY_E): building.ghost_yaw -= 1.5 * dt
 	swing = maxf(0.0, swing - dt)
 	desk_axe.rotation.x = 0.2 - sin(swing / 0.3 * PI) * 1.3
 
@@ -596,7 +722,12 @@ func _process(dt: float) -> void:
 		_update_desktop(dt)
 	_collide()
 	_pickup_logs()
+	wood -= building.update(dt, camera.global_position, wood)
+	var before := time_of_day
 	_update_day_night(dt)
+	if time_of_day < before:
+		day += 1
+	journal.set_status(day, _clock(), wood)
 	_update_fires(dt)
 	_update_shake(dt)
 	if msg_t > 0.0:
@@ -627,11 +758,79 @@ func _pickup_logs() -> void:
 	var head := camera.global_position
 	for i in range(logs.size() - 1, -1, -1):
 		var l := logs[i]
-		if Vector2(l.position.x - head.x, l.position.z - head.z).length_squared() < 1.3:
-			l.queue_free()
+		if Vector2(l.position.x - head.x, l.position.z - head.z).length_squared() < 1.6:
 			logs.remove_at(i)
-			wood += 1
-			_thunk(0.3)
+			# the log flies up into your left hand
+			effects.fly_log(l, _log_target, _on_log_collected)
+
+
+func _log_target() -> Vector3:
+	return left.global_position if xr_active else camera.global_position + Vector3(0, -0.4, 0)
+
+
+func _on_log_collected() -> void:
+	wood += 1
+	_thunk(0.3)
+	if xr_active:
+		left.trigger_haptic_pulse("haptic", 0.0, 0.4, 0.05, 0.0)
+
+
+# ---------------------------------------------------------------- journal & building
+
+func _pressed(c: XRController3D, action: String) -> bool:
+	var key := "%s/%s" % [c.tracker, action]
+	var now := c.is_button_pressed(action)
+	var was: bool = prev_buttons.get(key, false)
+	prev_buttons[key] = now
+	prev_buttons[key + "/released"] = was and not now
+	return now and not was
+
+
+## Only valid after _pressed() was called for the same button this frame.
+func _released(c: XRController3D, action: String) -> bool:
+	return prev_buttons.get("%s/%s/released" % [c.tracker, action], false)
+
+
+func _update_hands() -> void:
+	left_hand.curl = left.get_float("grip")
+	left_hand.index_curl = left.get_float("trigger")
+	left_hand.thumb_curl = maxf(left_hand.curl, 0.3 if left.is_button_pressed("by_button") or left.is_button_pressed("ax_button") else 0.0)
+	# the right hand is wrapped around the axe handle
+	right_hand.curl = 0.8
+	right_hand.index_curl = 0.8 + right.get_float("trigger") * 0.2
+	right_hand.thumb_curl = 0.8
+
+
+func _place_journal(at: Vector3) -> void:
+	var to_eye := camera.global_position - at
+	journal.global_transform = Transform3D(Basis.looking_at(-to_eye.normalized(), Vector3.UP), at)
+
+
+## March along a ray until it goes under the terrain.
+func _ground_ray(from: Vector3, dir: Vector3, max_dist: float):
+	var d := 0.2
+	while d < max_dist:
+		var p := from + dir * d
+		if p.y < height_at(p.x, p.z):
+			return p
+		d += 0.15
+	return null
+
+
+func _on_blueprint_chosen(id: String) -> void:
+	journal.toggle()
+	var fwd := -camera.global_transform.basis.z
+	building.begin_place(id, atan2(-fwd.x, -fwd.z))
+	_say("Aim, then pull the trigger")
+
+
+func _on_site_completed(site: Dictionary) -> void:
+	_thunk(1.2)
+	if site.id == "campfire":
+		_light_fire(site.node)
+	else:
+		_say("%s built" % building.BLUEPRINTS[site.id].name)
+		effects.dust(site.node.global_position + Vector3(0, 0.3, 0), 1.2)
 
 
 const DAY_TOP := Color("5d86b5")
@@ -679,6 +878,7 @@ func _update_fires(dt: float) -> void:
 		f.light.light_energy = 2.5 * life * flick
 		f.flame.scale = Vector3(1, flick * life + 0.01, 1)
 		f.flame.visible = life > 0.0
+		f.sparks.emitting = life > 0.0
 
 
 func _update_shake(dt: float) -> void:
