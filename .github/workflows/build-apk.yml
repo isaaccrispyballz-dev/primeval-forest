@@ -2,7 +2,7 @@ name: Build Quest APK
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]   # main = stable build; other branches = test builds
   workflow_dispatch:
 
 env:
@@ -72,9 +72,22 @@ jobs:
           path: build/primeval.apk
 
       # A release gives a direct .apk link you can open in the Quest browser (no zip to unpack)
-      - uses: softprops/action-gh-release@v2
+      - name: Publish stable build (main)
+        if: github.ref_name == 'main'
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
           name: Primeval build ${{ github.run_number }}
           files: build/primeval.apk
           make_latest: true
+
+      - name: Publish test build (other branches)
+        if: github.ref_name != 'main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: test-${{ github.ref_name }}-${{ github.run_number }}
+          name: "TEST: ${{ github.ref_name }} (build ${{ github.run_number }})"
+          target_commitish: ${{ github.sha }}
+          files: build/primeval.apk
+          prerelease: true
+          make_latest: false

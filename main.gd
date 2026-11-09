@@ -19,6 +19,8 @@ const JUMP_MULT := 1.25            # boost when you let go mid-push
 const MAX_LAUNCH := 6.5            # m/s cap so you can't fling across the map
 const GROUND_FRICTION := 6.0
 const HAND_RADIUS := 0.05
+const GRASS_COUNT := 9000
+const ROCK_COUNT := 180
 
 var xr_active := false
 var rng := RandomNumberGenerator.new()
@@ -35,10 +37,8 @@ var hud_3d: Label3D
 var hud_2d: Label
 var thunk_player: AudioStreamPlayer
 
-var trunks: MultiMesh
-var leaves1: MultiMesh
-var leaves2: MultiMesh
-var stumps: MultiMesh
+var sky_mat: ProceduralSkyMaterial
+var tree_kinds: Array[Dictionary] = []   # each: parts (MultiMesh list), stump, ...
 var trees: Array[Dictionary] = []
 var logs: Array[Node3D] = []
 var fires: Array[Dictionary] = []
@@ -92,48 +92,38 @@ static func height_at(x: float, z: float) -> float:
 
 
 func _build_world() -> void:
+	sky_mat = ProceduralSkyMaterial.new()
+	sky_mat.sun_angle_max = 8.0
+	var sky := Sky.new()
+	sky.sky_material = sky_mat
+	sky.radiance_size = Sky.RADIANCE_SIZE_32
 	env = Environment.new()
-	env.background_mode = Environment.BG_COLOR
+	env.background_mode = Environment.BG_SKY
+	env.sky = sky
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.fog_enabled = true
 	env.fog_mode = Environment.FOG_MODE_DEPTH
-	env.fog_depth_begin = 10.0
+	env.fog_depth_begin = 8.0
 	env.fog_depth_end = 70.0
+	env.fog_sky_affect = 0.6
 	var we := WorldEnvironment.new()
 	we.environment = env
 	add_child(we)
 
 	sun = DirectionalLight3D.new()
 	sun.light_color = Color("fff1d0")
+	sun.shadow_enabled = true
+	sun.shadow_bias = 0.08
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
+	sun.directional_shadow_max_distance = 28.0
 	add_child(sun)
 
-	# terrain mesh with vertex colors
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var n := 90
-	var step := WORLD / n
-	var low := Color("2f4a24")
-	var high := Color("4f5a2c")
-	for iz in n:
-		for ix in n:
-			var quad := [Vector2(ix, iz), Vector2(ix + 1, iz), Vector2(ix, iz + 1),
-				Vector2(ix + 1, iz), Vector2(ix + 1, iz + 1), Vector2(ix, iz + 1)]
-			for q in quad:
-				var x: float = -WORLD / 2 + q.x * step
-				var z: float = -WORLD / 2 + q.y * step
-				var h := height_at(x, z)
-				st.set_color(low.lerp(high, clampf((h + 2.0) / 5.0, 0.0, 1.0)))
-				st.add_vertex(Vector3(x, h, z))
-	st.generate_normals()
-	var ground_mat := StandardMaterial3D.new()
-	ground_mat.vertex_color_use_as_albedo = true
-	ground_mat.roughness = 1.0
-	var ground := MeshInstance3D.new()
-	ground.mesh = st.commit()
-	ground.material_override = ground_mat
-	add_child(ground)
+	add_child(Scenery.terrain(WORLD, 120, height_at))
+	_build_grass()
+	_build_rocks()
 
-	bark_mat = _mat("4a3423")
+	bark_mat = Scenery.mat("4a3423")
 	log_mesh = CylinderMesh.new()
 	log_mesh.top_radius = 0.12
 	log_mesh.bottom_radius = 0.12
@@ -142,11 +132,48 @@ func _build_world() -> void:
 	log_mesh.material = bark_mat
 
 
-func _mat(hex: String) -> StandardMaterial3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = Color(hex)
-	m.roughness = 1.0
-	return m
+func _build_grass() -> void:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.mesh = Scenery.grass_clump()
+	mm.instance_count = GRASS_COUNT
+	var placed := 0
+	while placed < GRASS_COUNT:
+		var x := rng.randf_range(-0.5, 0.5) * (WORLD - 6.0)
+		var z := rng.randf_range(-0.5, 0.5) * (WORLD - 6.0)
+		# grass grows in patches: skip spots where a slow noise is low
+		if sin(x * 0.09) * cos(z * 0.07) + sin(x * 0.23 + z * 0.17) * 0.5 < -0.2:
+			continue
+		var s := rng.randf_range(0.6, 1.3)
+		var b := Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3(s, s * rng.randf_range(0.8, 1.4), s))
+		mm.set_instance_transform(placed, Transform3D(b, Vector3(x, height_at(x, z) - 0.03, z)))
+		mm.set_instance_color(placed, Color(1, 1, 1).lerp(Color("b8a660"), rng.randf() * 0.3))
+		placed += 1
+	var mi := MultiMeshInstance3D.new()
+	mi.multimesh = mm
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(mi)
+
+
+func _build_rocks() -> void:
+	for variant in 3:
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_colors = true
+		mm.mesh = Scenery.rock(variant + 11)
+		mm.instance_count = ROCK_COUNT / 3
+		for i in mm.instance_count:
+			var x := rng.randf_range(-0.5, 0.5) * (WORLD - 8.0)
+			var z := rng.randf_range(-0.5, 0.5) * (WORLD - 8.0)
+			var s := rng.randf_range(0.4, 1.6) * (3.0 if rng.randf() < 0.08 else 1.0)
+			var b := Basis.from_euler(Vector3(rng.randf() * 0.4, rng.randf() * TAU, rng.randf() * 0.4)).scaled(Vector3(s, s * 0.7, s))
+			mm.set_instance_transform(i, Transform3D(b, Vector3(x, height_at(x, z) - 0.2 * s, z)))
+			var g := rng.randf_range(0.24, 0.36)
+			mm.set_instance_color(i, Color(g, g * 0.98, g * 0.92).lerp(Color("4b5a32"), rng.randf() * 0.3))
+		var mi := MultiMeshInstance3D.new()
+		mi.multimesh = mm
+		add_child(mi)
 
 
 func _build_player() -> void:
@@ -200,7 +227,7 @@ func _make_axe() -> Node3D:
 	hm.bottom_radius = 0.022
 	hm.height = 0.62
 	hm.radial_segments = 6
-	hm.material = _mat("8a6440")
+	hm.material = Scenery.mat("8a6440")
 	handle.mesh = hm
 	handle.rotation.x = PI / 2
 	handle.position.z = -0.2
@@ -208,7 +235,7 @@ func _make_axe() -> Node3D:
 	var head := MeshInstance3D.new()
 	var bm := BoxMesh.new()
 	bm.size = Vector3(0.03, 0.16, 0.1)
-	var steel := _mat("9aa3a8")
+	var steel := Scenery.mat("9aa3a8")
 	steel.metallic = 0.6
 	steel.roughness = 0.4
 	bm.material = steel
@@ -222,66 +249,70 @@ func _make_axe() -> Node3D:
 	return axe
 
 
-func _multimesh(mesh: Mesh) -> MultiMesh:
+func _multimesh(mesh: Mesh, count: int, colors := false, shadows := true) -> MultiMesh:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = colors
 	mm.mesh = mesh
-	mm.instance_count = TREE_COUNT
+	mm.instance_count = count
 	var mi := MultiMeshInstance3D.new()
 	mi.multimesh = mm
+	if not shadows:
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(mi)
 	return mm
 
 
-func _cyl(top: float, bottom: float, h: float, y: float, mat: Material) -> ArrayMesh:
-	# Godot primitives are centered; bake an offset so tree origin sits at the base.
-	var c := CylinderMesh.new()
-	c.top_radius = top
-	c.bottom_radius = bottom
-	c.height = h
-	c.radial_segments = 7
-	c.rings = 1
-	var arr := c.get_mesh_arrays()
-	var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
-	for i in verts.size():
-		verts[i].y += y
-	arr[Mesh.ARRAY_VERTEX] = verts
-	var out := ArrayMesh.new()
-	out.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-	out.surface_set_material(0, mat)
-	return out
-
-
 func _build_trees() -> void:
-	var leaf := _mat("1f3d26")
-	trunks = _multimesh(_cyl(0.22, 0.32, 4.0, 2.0, bark_mat))
-	leaves1 = _multimesh(_cyl(0.0, 1.8, 3.4, 4.6, leaf))
-	leaves2 = _multimesh(_cyl(0.0, 1.2, 2.6, 6.4, leaf))
-	stumps = _multimesh(_cyl(0.24, 0.32, 0.45, 0.22, _mat("6b4d30")))
+	tree_kinds = Scenery.tree_kinds()
+	# decide each tree's kind and spot first, so each kind's MultiMesh gets an exact count
+	var counts := []
+	counts.resize(tree_kinds.size())
+	counts.fill(0)
 	for i in TREE_COUNT:
 		var x := 0.0
 		var z := 0.0
 		while x * x + z * z < 49.0:
 			x = rng.randf_range(-0.5, 0.5) * (WORLD - 10.0)
 			z = rng.randf_range(-0.5, 0.5) * (WORLD - 10.0)
+		# pines on high ground, broadleaf in the hollows
+		var h := height_at(x, z)
+		var kind := 0 if rng.randf() < clampf(0.45 + h * 0.12, 0.15, 0.9) else 1
 		var s := rng.randf_range(0.75, 1.35)
 		trees.append({
-			"pos": Vector3(x, height_at(x, z) - 0.1, z), "s": s, "rot": rng.randf() * TAU,
-			"hp": 4, "felled": false, "shake": 0.0, "r": 0.3 * s,
+			"kind": kind, "k": counts[kind],
+			"pos": Vector3(x, h - 0.1, z), "s": s, "rot": rng.randf() * TAU,
+			"tilt": Vector2(rng.randf_range(-0.04, 0.04), rng.randf_range(-0.04, 0.04)),
+			"tint": rng.randf_range(0.8, 1.15),
+			"hp": 4, "felled": false, "shake": 0.0,
+			"r": tree_kinds[kind].radius * s, "trunk_h": tree_kinds[kind].trunk_h * s,
 		})
+		counts[kind] += 1
+	for ki in tree_kinds.size():
+		var kd: Dictionary = tree_kinds[ki]
+		var mms: Array[MultiMesh] = []
+		for p in kd.parts:
+			mms.append(_multimesh(p, counts[ki], true))
+		kd.mms = mms
+		kd.stump_mm = _multimesh(kd.stump, counts[ki], false, false)
+	for i in trees.size():
+		var t: Dictionary = trees[i]
+		var kd: Dictionary = tree_kinds[t.kind]
+		for pi in kd.mms.size():
+			var c := Color(kd.part_colors[pi])
+			kd.mms[pi].set_instance_color(t.k, Color(c.r * t.tint, c.g * t.tint, c.b * t.tint))
 		_set_tree(i)
 
 
 func _set_tree(i: int, sway := 0.0) -> void:
 	var t: Dictionary = trees[i]
-	var b := Basis.from_euler(Vector3(sway, t.rot, sway * 0.5)).scaled(Vector3.ONE * t.s)
-	var xf := Transform3D(b, t.pos)
+	var kd: Dictionary = tree_kinds[t.kind]
+	var b := Basis.from_euler(Vector3(t.tilt.x + sway, t.rot, t.tilt.y + sway * 0.5)).scaled(Vector3.ONE * t.s)
 	var hidden := Transform3D(Basis().scaled(Vector3.ZERO), t.pos)
-	var standing := hidden if t.felled else xf
-	trunks.set_instance_transform(i, standing)
-	leaves1.set_instance_transform(i, standing)
-	leaves2.set_instance_transform(i, standing)
-	stumps.set_instance_transform(i, Transform3D(Basis().scaled(Vector3.ONE * t.s), t.pos) if t.felled else hidden)
+	var standing := hidden if t.felled else Transform3D(b, t.pos)
+	for mm in kd.mms:
+		mm.set_instance_transform(t.k, standing)
+	kd.stump_mm.set_instance_transform(t.k, Transform3D(Basis(Vector3.UP, t.rot).scaled(Vector3.ONE * t.s), t.pos) if t.felled else hidden)
 
 
 func _build_audio() -> void:
@@ -328,7 +359,7 @@ func _try_hit(point: Vector3, speed: float, ctrl: XRController3D = null) -> bool
 		if d.length_squared() > pow(t.r + 0.15, 2):
 			continue
 		var y_rel: float = point.y - t.pos.y
-		if y_rel < 0.0 or y_rel > 4.0 * t.s:
+		if y_rel < 0.0 or y_rel > t.trunk_h:
 			continue
 		chop_cooldown = 0.35
 		t.hp -= 1
@@ -440,7 +471,7 @@ func _hand_contact(p: Vector3):
 		var d := Vector2(p.x - t.pos.x, p.z - t.pos.z)
 		var r: float = t.r + HAND_RADIUS
 		var y_rel: float = p.y - t.pos.y
-		if d.length_squared() < r * r and y_rel > 0.0 and y_rel < 4.0 * t.s:
+		if d.length_squared() < r * r and y_rel > 0.0 and y_rel < t.trunk_h:
 			var n := d.normalized() if d.length_squared() > 0.000001 else Vector2(1, 0)
 			return Vector3(t.pos.x + n.x * r, p.y, t.pos.z + n.y * r)
 	return null
@@ -603,26 +634,40 @@ func _pickup_logs() -> void:
 			_thunk(0.3)
 
 
-const DAY_SKY := Color("8fb0a0")
-const DUSK_SKY := Color("c0704a")
-const NIGHT_SKY := Color("05080d")
+const DAY_TOP := Color("5d86b5")
+const DAY_HORIZON := Color("a9c3c0")
+const DUSK_HORIZON := Color("d9874f")
+const NIGHT_TOP := Color("03050b")
+const NIGHT_HORIZON := Color("0b1220")
+const MOON_COLOR := Color("8fa6d6")
 
 func _update_day_night(dt: float) -> void:
 	time_of_day = fmod(time_of_day + dt / DAY_LENGTH, 1.0)
 	var ang := time_of_day * TAU
 	var elev := sin(ang)
-	# light points from the sun toward the player
-	sun.look_at_from_position(Vector3(cos(ang) * 50, elev * 50, 20), Vector3.ZERO)
 	var day := smoothstep(-0.15, 0.25, elev)
-	var dusk := maxf(0.0, 1.0 - absf(elev) * 4.0) * 0.8
-	var sky := NIGHT_SKY.lerp(DAY_SKY, day).lerp(DUSK_SKY, dusk * day)
-	env.background_color = sky
-	env.fog_light_color = sky
-	env.fog_depth_end = 18.0 + day * 52.0
-	env.ambient_light_color = Color("cfe6ff").lerp(Color("2a3a55"), 1.0 - day)
-	env.ambient_light_energy = 0.15 + day * 0.6
-	sun.light_energy = day * 1.2
-	sun.visible = day > 0.01
+	var dusk := maxf(0.0, 1.0 - absf(elev) * 4.0) * 0.9
+	var top := NIGHT_TOP.lerp(DAY_TOP, day)
+	var horizon := NIGHT_HORIZON.lerp(DAY_HORIZON, day).lerp(DUSK_HORIZON, dusk * day)
+	sky_mat.sky_top_color = top
+	sky_mat.sky_horizon_color = horizon
+	sky_mat.ground_horizon_color = horizon
+	sky_mat.ground_bottom_color = horizon.darkened(0.6)
+	env.fog_light_color = horizon.darkened(0.15)
+	env.fog_depth_end = 22.0 + day * 50.0
+	env.ambient_light_color = Color("cfe6ff").lerp(Color("2a3a5e"), 1.0 - day)
+	env.ambient_light_energy = 0.18 + day * 0.55
+	# one directional light: the sun by day, a dim blue moon (opposite side) by night
+	var sun_dir := Vector3(cos(ang), elev, 0.35).normalized()
+	if elev > -0.05:
+		sun.look_at_from_position(sun_dir * 50.0, Vector3.ZERO)
+		sun.light_color = Color("fff1d0").lerp(Color("ffb070"), dusk)
+		sun.light_energy = day * 1.25
+	else:
+		sun.look_at_from_position(-sun_dir * 50.0, Vector3.ZERO)
+		sun.light_color = MOON_COLOR
+		sun.light_energy = 0.22 * smoothstep(0.0, 0.3, -elev)
+	sun.visible = sun.light_energy > 0.01
 
 
 func _update_fires(dt: float) -> void:
