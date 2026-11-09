@@ -27,3 +27,9 @@ Every push to `main` builds an APK and publishes it as the latest GitHub release
 
 ## Web prototype
 `web-prototype/index.html` is the earlier WebXR version (three.js) of the same game.
+
+## Field journal and building
+- **Y (left controller)** opens the field journal in your left hand. Point with the right hand and pull the trigger to tap.
+- **Build tab:** pick a blueprint (campfire, log wall, platform, lean-to), aim at the ground, turn it with the right stick, trigger to set it down, B to cancel.
+- Stand next to a blueprint with logs and they fly into place one at a time. You can stand on platforms and walls and push off logs with your hands.
+- PC: J opens the journal, click to tap, Q/E turn a blueprint, click to place, X cancels.
