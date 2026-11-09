@@ -261,33 +261,7 @@ func _build_player() -> void:
 
 
 func _make_axe() -> Node3D:
-	var axe := Node3D.new()
-	var handle := MeshInstance3D.new()
-	var hm := CylinderMesh.new()
-	hm.top_radius = 0.018
-	hm.bottom_radius = 0.022
-	hm.height = 0.62
-	hm.radial_segments = 6
-	hm.material = Scenery.mat("8a6440")
-	handle.mesh = hm
-	handle.rotation.x = PI / 2
-	handle.position.z = -0.2
-	axe.add_child(handle)
-	var head := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = Vector3(0.03, 0.16, 0.1)
-	var steel := Scenery.mat("9aa3a8")
-	steel.metallic = 0.6
-	steel.roughness = 0.4
-	bm.material = steel
-	head.mesh = bm
-	head.position = Vector3(0, 0.06, -0.46)
-	axe.add_child(head)
-	var tip := Node3D.new()
-	tip.name = "Tip"
-	tip.position = Vector3(0, 0.1, -0.46)
-	axe.add_child(tip)
-	return axe
+	return Axe.build()
 
 
 func _multimesh(mesh: Mesh, count: int, colors := false, shadows := true) -> MultiMesh:

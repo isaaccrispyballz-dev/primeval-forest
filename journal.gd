@@ -292,11 +292,91 @@ func _page_build() -> void:
 
 
 func _page_guide() -> void:
-	_left_box.add_child(_label("Moving", 34, ACCENT))
-	_left_box.add_child(_label("Press your hands into the ground or a trunk and push. Let go mid-push to leap.\nLeft stick walks. Right stick turns.", 26))
-	_left_box.add_child(_label("Chopping", 34, ACCENT))
-	_left_box.add_child(_label("Swing the axe into a trunk. Walk to fallen logs to pick them up.", 26))
-	_right_box.add_child(_label("Journal", 34, ACCENT))
-	_right_box.add_child(_label("Y opens and closes this book. Point with your right hand and pull the trigger to tap.", 26))
-	_right_box.add_child(_label("Building", 34, ACCENT))
-	_right_box.add_child(_label("Choose a blueprint, set it down, then stand next to it. Your logs go in one at a time.", 26))
+	_left_box.add_child(ControllerDiagram.new(true))
+	_left_box.add_child(_label("Moving: press your hands into the ground or a trunk and push. Let go mid-push to leap.", 20, FADED))
+	_right_box.add_child(ControllerDiagram.new(false))
+	_right_box.add_child(_label("Chopping: swing the axe into a trunk. Walk over fallen logs to pick them up.", 20, FADED))
+
+
+## A drawn Quest controller seen from above, with labelled buttons.
+class ControllerDiagram extends Control:
+	var left_side := true
+
+	func _init(is_left: bool) -> void:
+		left_side = is_left
+		custom_minimum_size = Vector2(400, 400)
+
+	func _draw() -> void:
+		var font := get_theme_default_font()
+		var ink := Color("2b2118")
+		var faded := Color("6e5b45")
+		var accent := Color("8c3b1f")
+		var body := Color("d9cdb0")
+		var w := size.x
+		var cx := w * (0.62 if left_side else 0.38)   # leave room for labels on the outer side
+		var cy := 150.0
+		var mirror := -1.0 if left_side else 1.0
+
+		draw_string(font, Vector2(0, 30), "LEFT HAND" if left_side else "RIGHT HAND", HORIZONTAL_ALIGNMENT_CENTER, w, 26, accent)
+
+		# handle (drawn first so the face sits on top)
+		var handle := PackedVector2Array([
+			Vector2(cx - 34, cy + 40), Vector2(cx + 34, cy + 40),
+			Vector2(cx + 26 + 10 * mirror, cy + 230), Vector2(cx - 26 + 10 * mirror, cy + 236)])
+		draw_colored_polygon(handle, body)
+		draw_polyline(handle + PackedVector2Array([handle[0]]), ink, 3.0, true)
+		# face
+		draw_circle(Vector2(cx, cy), 82, body)
+		draw_arc(Vector2(cx, cy), 82, 0, TAU, 48, ink, 3.0, true)
+
+		var stick := Vector2(cx + 30 * mirror, cy - 18)
+		var top_btn := Vector2(cx - 26 * mirror, cy - 34)
+		var low_btn := Vector2(cx - 34 * mirror, cy + 12)
+		var sys_btn := Vector2(cx - 4 * mirror, cy + 44)
+		draw_circle(stick, 27, Color("6e5b45"))
+		draw_circle(stick, 19, Color("8a7357"))
+		draw_circle(top_btn, 17, Color("efe4c8"))
+		draw_arc(top_btn, 17, 0, TAU, 24, ink, 2.0, true)
+		draw_circle(low_btn, 17, Color("efe4c8"))
+		draw_arc(low_btn, 17, 0, TAU, 24, ink, 2.0, true)
+		draw_circle(sys_btn, 8, faded)
+		draw_string(font, top_btn + Vector2(-17, 8), "Y" if left_side else "B", HORIZONTAL_ALIGNMENT_CENTER, 34, 22, ink)
+		draw_string(font, low_btn + Vector2(-17, 8), "X" if left_side else "A", HORIZONTAL_ALIGNMENT_CENTER, 34, 22, ink)
+		# trigger (front, under the index finger) and grip (side of the handle)
+		var trig := Vector2(cx + 20 * mirror, cy - 92)
+		draw_rect(Rect2(trig - Vector2(22, 9), Vector2(44, 18)), Color("8a7357"))
+		var grip := Vector2(cx - 34 * mirror, cy + 130)
+		draw_rect(Rect2(grip - Vector2(9, 32), Vector2(18, 64)), Color("8a7357"))
+
+		var labels := []
+		if left_side:
+			labels = [
+				[trig, "Trigger  Index finger"],
+				[stick, "Stick  Walk"],
+				[top_btn, "Y  Field journal"],
+				[low_btn, "X  (not used yet)"],
+				[grip, "Grip  Close hand"],
+			]
+		else:
+			labels = [
+				[trig, "Trigger  Tap / place"],
+				[stick, "Stick  Turn / rotate"],
+				[top_btn, "B  Cancel blueprint"],
+				[low_btn, "A  Quick campfire"],
+				[grip, "Grip  (holds the axe)"],
+			]
+		var label_x := 4.0 if left_side else w - 4.0
+		var y := 70.0
+		for item in labels:
+			var target: Vector2 = item[0]
+			var text: String = item[1]
+			var anchor := Vector2(label_x + (150 if left_side else -150), y)
+			draw_line(anchor + Vector2(6 * -mirror, -7), target, faded, 1.5, true)
+			draw_circle(target, 3.5, accent)
+			var align := HORIZONTAL_ALIGNMENT_LEFT if left_side else HORIZONTAL_ALIGNMENT_RIGHT
+			var x := label_x if left_side else label_x - 150
+			var parts := text.split("  ")
+			draw_string(font, Vector2(x, y - 4), parts[0], align, 150, 19, accent)
+			if parts.size() > 1:
+				draw_string(font, Vector2(x, y + 18), parts[1], align, 150, 17, ink)
+			y += 72.0
