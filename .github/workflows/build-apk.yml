@@ -30,12 +30,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           apt-get update -qq && apt-get install -y -qq unzip curl jq > /dev/null
-          releases=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/GodotVR/godot_openxr_vendors/releases?per_page=50")
-          echo "Available vendor plugin releases:"; echo "$releases" | jq -r '.[].tag_name'
+          curl -sSL -o /tmp/releases.json -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/GodotVR/godot_openxr_vendors/releases?per_page=50"
+          echo "Available vendor plugin releases:"; jq -r '.[].tag_name' /tmp/releases.json
           # newest 3.x release: the line that supports Godot 4.3
-          url=$(echo "$releases" | jq -r '[.[] | select(.tag_name | test("^v?3\\."))][0].assets[]
-            | select(.name | endswith(".zip")) | .browser_download_url' | head -1)
+          url=$(jq -r '[.[] | select(.tag_name | test("^v?3\\."))][0].assets[]
+            | select(.name | endswith(".zip")) | .browser_download_url' /tmp/releases.json | head -1)
           echo "Downloading $url"
           test -n "$url"
           curl -sSL -o /tmp/vendors.zip "$url"
