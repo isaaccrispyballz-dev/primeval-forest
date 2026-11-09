@@ -1,5 +1,5 @@
 extends Node3D
-## Lanternwood: original forest survival game for Meta Quest 3.
+## Primeval: original forest survival game for Meta Quest 3.
 ## Everything is built in code so the project stays a few small text files.
 ## On Quest it runs in VR via OpenXR; on a PC without a headset it falls back
 ## to WASD + mouse so you can test quickly in the Godot editor.

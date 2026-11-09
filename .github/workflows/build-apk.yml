@@ -63,18 +63,18 @@ jobs:
         run: |
           mkdir -p build
           godot --headless --import || true
-          godot --headless --export-debug "Quest" build/lanternwood.apk
+          godot --headless --export-debug "Quest" build/primeval.apk
           ls -la build
 
       - uses: actions/upload-artifact@v4
         with:
-          name: lanternwood-apk
-          path: build/lanternwood.apk
+          name: primeval-apk
+          path: build/primeval.apk
 
       # A release gives a direct .apk link you can open in the Quest browser (no zip to unpack)
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: Lanternwood build ${{ github.run_number }}
-          files: build/lanternwood.apk
+          name: Primeval build ${{ github.run_number }}
+          files: build/primeval.apk
           make_latest: true
