@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lanternwood</title>
+<style>
+  :root { --bg:#0d1410; --fg:#e8e4d4; --accent:#e9a23b; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg); font-family:system-ui,sans-serif; overflow:hidden; }
+  #hud { position:fixed; top:12px; left:12px; padding:8px 12px; background:rgba(0,0,0,.45); border-radius:8px; font-size:14px; line-height:1.5; pointer-events:none; }
+  #intro { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:rgba(5,10,7,.82); }
+  #intro .card { max-width:440px; margin:16px; padding:20px 22px; background:#18221b; border-radius:12px; }
+  #intro h1 { margin:0 0 6px; color:var(--accent); font-size:26px; }
+  #intro p { margin:6px 0; font-size:14px; line-height:1.45; }
+  #intro button { margin-top:12px; padding:10px 16px; font-size:15px; border:0; border-radius:8px; background:var(--accent); color:#1a1206; cursor:pointer; }
+  #crosshair { position:fixed; left:50%; top:50%; width:6px; height:6px; margin:-3px; border-radius:50%; background:rgba(255,255,255,.7); display:none; }
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<div id="crosshair"></div>
+<div id="intro"><div class="card">
+  <h1>Lanternwood</h1>
+  <p>Your survey drone went down somewhere in an old-growth valley that isn't on any map. Night here is long, and the things that live in the dark don't like fire.</p>
+  <p><b>Quest 3:</b> press <b>Enter VR</b>. Left stick moves, right stick snap-turns. Swing the axe (right hand) into a trunk to chop. <b>A</b> builds a campfire for 5 wood.</p>
+  <p><b>Desktop:</b> click to play, WASD to move, mouse to look, click to chop, <b>F</b> for campfire.</p>
+  <button id="play">Play on desktop</button>
+</div></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+// ---------- config ----------
+const WORLD = 180, TREE_COUNT = 650, DAY_LENGTH = 300; // seconds per full day
+const MOVE_SPEED = 2.6, SNAP = Math.PI / 6, WOOD_PER_FIRE = 5;
+
+// ---------- renderer / scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setFoveation?.(1);
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x8fb0a0, 10, 70);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 200);
+const rig = new THREE.Group();           // player origin, moved by locomotion
+rig.add(camera);
+scene.add(rig);
+
+const hemi = new THREE.HemisphereLight(0xcfe6ff, 0x2a3320, 0.9);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff1d0, 1.2);
+scene.add(sun, sun.target);
+
+// ---------- deterministic random + terrain ----------
+let seed = 1337;
+const rand = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
+const heightAt = (x, z) =>
+  Math.sin(x * 0.045) * Math.cos(z * 0.05) * 2.2 +
+  Math.sin(x * 0.11 + z * 0.07) * 0.8 +
+  Math.cos(z * 0.13 - x * 0.03) * 0.5;
+
+{
+  const g = new THREE.PlaneGeometry(WORLD, WORLD, 90, 90);
+  g.rotateX(-Math.PI / 2);
+  const pos = g.attributes.position, colors = [];
+  const c1 = new THREE.Color(0x2f4a24), c2 = new THREE.Color(0x4f5a2c), c = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i), h = heightAt(x, z);
+    pos.setY(i, h);
+    c.lerpColors(c1, c2, THREE.MathUtils.clamp((h + 2) / 5 + (rand() - .5) * .2, 0, 1));
+    colors.push(c.r, c.g, c.b);
+  }
+  g.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  g.computeVertexNormals();
+  scene.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true })));
+}
+
+// ---------- trees (instanced for Quest performance) ----------
+const trunkGeo = new THREE.CylinderGeometry(0.22, 0.32, 4, 7).translate(0, 2, 0);
+const leafGeo1 = new THREE.ConeGeometry(1.8, 3.4, 7).translate(0, 4.6, 0);
+const leafGeo2 = new THREE.ConeGeometry(1.2, 2.6, 7).translate(0, 6.4, 0);
+const stumpGeo = new THREE.CylinderGeometry(0.24, 0.32, 0.45, 7).translate(0, 0.22, 0);
+const barkMat = new THREE.MeshLambertMaterial({ color: 0x4a3423 });
+const leafMat = new THREE.MeshLambertMaterial({ color: 0x1f3d26 });
+const stumpMat = new THREE.MeshLambertMaterial({ color: 0x6b4d30 });
+const trunks = new THREE.InstancedMesh(trunkGeo, barkMat, TREE_COUNT);
+const leaves1 = new THREE.InstancedMesh(leafGeo1, leafMat, TREE_COUNT);
+const leaves2 = new THREE.InstancedMesh(leafGeo2, leafMat, TREE_COUNT);
+const stumps = new THREE.InstancedMesh(stumpGeo, stumpMat, TREE_COUNT);
+[trunks, leaves1, leaves2, stumps].forEach(m => { m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); scene.add(m); });
+
+const trees = [];
+const tmpM = new THREE.Matrix4(), tmpQ = new THREE.Quaternion(), tmpS = new THREE.Vector3(), tmpP = new THREE.Vector3();
+const ZERO = new THREE.Matrix4().makeScale(0, 0, 0);
+function setTree(i, sway = 0) {
+  const t = trees[i];
+  tmpP.set(t.x, t.y, t.z);
+  tmpQ.setFromEuler(new THREE.Euler(sway, t.rot, sway * 0.5));
+  tmpS.setScalar(t.s);
+  tmpM.compose(tmpP, tmpQ, tmpS);
+  const m = t.felled ? ZERO : tmpM;
+  trunks.setMatrixAt(i, m); leaves1.setMatrixAt(i, m); leaves2.setMatrixAt(i, m);
+  if (t.felled) { tmpQ.identity(); tmpM.compose(tmpP, tmpQ, tmpS); stumps.setMatrixAt(i, tmpM); }
+  else stumps.setMatrixAt(i, ZERO);
+  trunks.instanceMatrix.needsUpdate = leaves1.instanceMatrix.needsUpdate =
+    leaves2.instanceMatrix.needsUpdate = stumps.instanceMatrix.needsUpdate = true;
+}
+for (let i = 0; i < TREE_COUNT; i++) {
+  let x, z;
+  do { x = (rand() - .5) * (WORLD - 10); z = (rand() - .5) * (WORLD - 10); } while (x * x + z * z < 49);
+  const s = 0.75 + rand() * 0.6;
+  trees.push({ x, z, y: heightAt(x, z) - 0.1, s, rot: rand() * 6.28, hp: 4, felled: false, shake: 0, r: 0.3 * s });
+  setTree(i);
+}
+
+// ---------- logs on the ground + campfires ----------
+const logGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.9, 6).rotateZ(Math.PI / 2);
+const logs = [];
+function dropLogs(t) {
+  for (let k = 0; k < 3; k++) {
+    const m = new THREE.Mesh(logGeo, barkMat);
+    const a = rand() * 6.28, d = 0.8 + rand() * 0.8;
+    m.position.set(t.x + Math.cos(a) * d, 0, t.z + Math.sin(a) * d);
+    m.position.y = heightAt(m.position.x, m.position.z) + 0.12;
+    m.rotation.y = rand() * 6.28;
+    scene.add(m); logs.push(m);
+  }
+}
+
+const fires = [];
+const fireMat = new THREE.MeshBasicMaterial({ color: 0xffa040 });
+function buildFire(x, z) {
+  const g = new THREE.Group(), y = heightAt(x, z);
+  g.position.set(x, y, z);
+  for (let k = 0; k < 4; k++) {
+    const l = new THREE.Mesh(logGeo, barkMat);
+    l.rotation.y = k * Math.PI / 4; l.position.y = 0.1; g.add(l);
+  }
+  const flame = new THREE.Mesh(new THREE.ConeGeometry(0.25, 0.7, 6), fireMat);
+  flame.position.y = 0.45; g.add(flame);
+  const light = new THREE.PointLight(0xff8a30, 0, 14, 1.6);
+  light.position.y = 0.9; g.add(light);
+  scene.add(g);
+  fires.push({ g, flame, light, fuel: 180 });
+  // keep the light count low for Quest: extinguish the oldest beyond 4
+  if (fires.length > 4) { const old = fires.shift(); scene.remove(old.g); }
+}
+
+// ---------- audio (tiny synthesized thunk, no asset files) ----------
+let actx;
+function thunk(strength = 1) {
+  actx ??= new (window.AudioContext || window.webkitAudioContext)();
+  const len = 0.12, buf = actx.createBuffer(1, actx.sampleRate * len, actx.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 4);
+  const src = actx.createBufferSource(); src.buffer = buf;
+  const f = actx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 900;
+  const gn = actx.createGain(); gn.gain.value = 0.6 * strength;
+  src.connect(f).connect(gn).connect(actx.destination); src.start();
+}
+
+// ---------- axe model ----------
+function makeAxe() {
+  const axe = new THREE.Group();
+  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.022, 0.62, 6), new THREE.MeshLambertMaterial({ color: 0x8a6440 }));
+  handle.rotation.x = Math.PI / 2; handle.position.z = -0.2; axe.add(handle);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.16, 0.1), new THREE.MeshLambertMaterial({ color: 0x9aa3a8 }));
+  head.position.set(0, 0.06, -0.46); axe.add(head);
+  axe.userData.tip = new THREE.Object3D(); axe.userData.tip.position.set(0, 0.1, -0.46); axe.add(axe.userData.tip);
+  return axe;
+}
+
+// ---------- state + HUD ----------
+const state = { wood: 0, time: 0.3, msg: '', msgT: 0 };
+const hudEl = document.getElementById('hud');
+const hudCanvas = document.createElement('canvas'); hudCanvas.width = 256; hudCanvas.height = 128;
+const hudTex = new THREE.CanvasTexture(hudCanvas);
+const hudPlane = new THREE.Mesh(new THREE.PlaneGeometry(0.14, 0.07), new THREE.MeshBasicMaterial({ map: hudTex, transparent: true }));
+hudPlane.position.set(0, 0.04, 0.06); hudPlane.rotation.x = -Math.PI / 3;
+function clockText() {
+  const h = (state.time * 24 + 6) % 24;
+  return `${String(Math.floor(h)).padStart(2, '0')}:${String(Math.floor((h % 1) * 60)).padStart(2, '0')}`;
+}
+let lastHud = '';
+function updateHud() {
+  const txt = `Wood ${state.wood} · ${clockText()}${state.msg ? '\n' + state.msg : ''}`;
+  if (txt === lastHud) return; lastHud = txt;
+  hudEl.innerText = txt;
+  const c = hudCanvas.getContext('2d');
+  c.clearRect(0, 0, 256, 128); c.fillStyle = 'rgba(0,0,0,.55)'; c.fillRect(0, 0, 256, 128);
+  c.fillStyle = '#f0e6c8'; c.font = 'bold 30px sans-serif';
+  txt.split('\n').forEach((line, i) => c.fillText(line, 12, 44 + i * 44));
+  hudTex.needsUpdate = true;
+}
+function say(m) { state.msg = m; state.msgT = 2.5; }
+
+// ---------- chopping ----------
+let chopCooldown = 0;
+function tryHit(point, speed, haptic) {
+  if (chopCooldown > 0) return;
+  for (let i = 0; i < trees.length; i++) {
+    const t = trees[i]; if (t.felled) continue;
+    const dx = point.x - t.x, dz = point.z - t.z;
+    if (dx * dx + dz * dz > (t.r + 0.15) ** 2) continue;
+    const yRel = point.y - t.y;
+    if (yRel < 0 || yRel > 4 * t.s) continue;
+    chopCooldown = 0.35; t.hp--; t.shake = 0.4;
+    thunk(Math.min(1, speed / 4)); haptic?.(0.7, 60);
+    if (t.hp <= 0) { t.felled = true; dropLogs(t); say('Timber!'); thunk(1.4); haptic?.(1, 200); }
+    setTree(i);
+    return;
+  }
+}
+
+// ---------- VR controllers ----------
+const hands = {};   // handedness -> { grip, gamepad, ... }
+for (let i = 0; i < 2; i++) {
+  const grip = renderer.xr.getControllerGrip(i);
+  rig.add(grip);
+  grip.addEventListener('connected', e => {
+    const hand = e.data.handedness;
+    hands[hand] = { grip, gamepad: e.data.gamepad, prev: new THREE.Vector3(), prevA: false, snapped: false };
+    grip.clear();
+    if (hand === 'right') { const axe = makeAxe(); grip.add(axe); hands[hand].axe = axe; }
+    else grip.add(hudPlane);
+  });
+  grip.addEventListener('disconnected', e => { delete hands[e.data?.handedness]; grip.clear(); });
+}
+const hapticFor = gp => (v, ms) => gp?.hapticActuators?.[0]?.pulse?.(v, ms);
+
+const tipPos = new THREE.Vector3(), camPos = new THREE.Vector3(), fwd = new THREE.Vector3(), right = new THREE.Vector3();
+function updateVR(dt) {
+  const L = hands.left, R = hands.right;
+  // locomotion: left stick, relative to head direction
+  if (L?.gamepad) {
+    const ax = L.gamepad.axes, x = ax[2] ?? 0, y = ax[3] ?? 0;
+    if (Math.hypot(x, y) > 0.15) {
+      camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize();
+      right.crossVectors(fwd, THREE.Object3D.DEFAULT_UP);
+      rig.position.addScaledVector(fwd, -y * MOVE_SPEED * dt).addScaledVector(right, x * MOVE_SPEED * dt);
+    }
+  }
+  if (R?.gamepad) {
+    // snap turn around the head, not the rig origin
+    const x = R.gamepad.axes[2] ?? 0;
+    if (Math.abs(x) > 0.7 && !R.snapped) {
+      R.snapped = true;
+      camera.getWorldPosition(camPos);
+      const ang = -Math.sign(x) * SNAP;
+      rig.position.sub(camPos).applyAxisAngle(THREE.Object3D.DEFAULT_UP, ang).add(camPos);
+      rig.rotation.y += ang;
+    } else if (Math.abs(x) < 0.3) R.snapped = false;
+    // A button: campfire
+    const a = !!R.gamepad.buttons[4]?.pressed;
+    if (a && !R.prevA) placeFire();
+    R.prevA = a;
+    // axe swing: velocity of the blade
+    R.axe.userData.tip.getWorldPosition(tipPos);
+    const speed = tipPos.distanceTo(R.prev) / Math.max(dt, 1e-3);
+    R.prev.copy(tipPos);
+    if (speed > 2.2) tryHit(tipPos, speed, hapticFor(R.gamepad));
+  }
+  rig.position.y = heightAt(rig.position.x, rig.position.z);
+}
+
+// ---------- desktop fallback ----------
+const keys = {};
+let yaw = 0, pitch = 0, swing = 0;
+const deskAxe = makeAxe();
+deskAxe.position.set(0.28, -0.3, -0.35); deskAxe.rotation.set(0.2, 0, 0);
+camera.add(deskAxe);
+addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'KeyF') placeFire(); });
+addEventListener('keyup', e => keys[e.code] = false);
+document.getElementById('play').onclick = () => { renderer.domElement.requestPointerLock(); };
+document.addEventListener('pointerlockchange', () => {
+  const locked = document.pointerLockElement === renderer.domElement;
+  document.getElementById('intro').style.display = locked ? 'none' : 'flex';
+  document.getElementById('crosshair').style.display = locked ? 'block' : 'none';
+});
+addEventListener('mousemove', e => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  yaw -= e.movementX * 0.0025; pitch = THREE.MathUtils.clamp(pitch - e.movementY * 0.0025, -1.4, 1.4);
+});
+addEventListener('mousedown', () => {
+  if (document.pointerLockElement !== renderer.domElement || swing > 0) return;
+  swing = 0.3;
+  camera.getWorldPosition(camPos); camera.getWorldDirection(fwd);
+  for (let d = 0.5; d <= 2.0; d += 0.1) tryHit(tipPos.copy(camPos).addScaledVector(fwd, d), 4);
+});
+function updateDesktop(dt) {
+  camera.rotation.set(pitch, yaw, 0, 'YXZ');
+  fwd.set(-Math.sin(yaw), 0, -Math.cos(yaw)); right.set(Math.cos(yaw), 0, -Math.sin(yaw));
+  const sp = MOVE_SPEED * (keys.ShiftLeft ? 1.8 : 1) * dt;
+  if (keys.KeyW) rig.position.addScaledVector(fwd, sp);
+  if (keys.KeyS) rig.position.addScaledVector(fwd, -sp);
+  if (keys.KeyD) rig.position.addScaledVector(right, sp);
+  if (keys.KeyA) rig.position.addScaledVector(right, -sp);
+  rig.position.y = heightAt(rig.position.x, rig.position.z) + 1.6;
+  swing = Math.max(0, swing - dt);
+  deskAxe.rotation.x = 0.2 - Math.sin((swing / 0.3) * Math.PI) * 1.3;
+}
+renderer.xr.addEventListener('sessionstart', () => { camera.rotation.set(0, 0, 0); deskAxe.visible = false; document.getElementById('intro').style.display = 'none'; });
+renderer.xr.addEventListener('sessionend', () => { deskAxe.visible = true; });
+
+function placeFire() {
+  if (state.wood < WOOD_PER_FIRE) { say(`Need ${WOOD_PER_FIRE} wood`); return; }
+  camera.getWorldPosition(camPos); camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize();
+  buildFire(camPos.x + fwd.x * 1.5, camPos.z + fwd.z * 1.5);
+  state.wood -= WOOD_PER_FIRE; say('Campfire lit');
+}
+
+// ---------- shared update ----------
+function collide() {
+  camera.getWorldPosition(camPos);
+  for (const t of trees) {
+    if (t.felled) continue;
+    const dx = camPos.x - t.x, dz = camPos.z - t.z, min = t.r + 0.3, d2 = dx * dx + dz * dz;
+    if (d2 < min * min && d2 > 1e-6) { const d = Math.sqrt(d2), push = min - d; rig.position.x += dx / d * push; rig.position.z += dz / d * push; }
+  }
+  const lim = WORLD / 2 - 4;
+  rig.position.x = THREE.MathUtils.clamp(rig.position.x, -lim, lim);
+  rig.position.z = THREE.MathUtils.clamp(rig.position.z, -lim, lim);
+}
+
+function pickupLogs() {
+  camera.getWorldPosition(camPos);
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const l = logs[i], dx = l.position.x - camPos.x, dz = l.position.z - camPos.z;
+    if (dx * dx + dz * dz < 1.3) { scene.remove(l); logs.splice(i, 1); state.wood++; thunk(0.3); }
+  }
+}
+
+const daySky = new THREE.Color(0x8fb0a0), duskSky = new THREE.Color(0xc0704a), nightSky = new THREE.Color(0x05080d), sky = new THREE.Color();
+function updateDayNight(dt) {
+  state.time = (state.time + dt / DAY_LENGTH) % 1;
+  const ang = state.time * Math.PI * 2;           // 0 = 06:00 sunrise
+  const elev = Math.sin(ang);
+  sun.position.set(Math.cos(ang) * 50, elev * 50, 20).add(rig.position);
+  sun.target.position.copy(rig.position);
+  const day = THREE.MathUtils.smoothstep(elev, -0.15, 0.25);
+  const dusk = Math.max(0, 1 - Math.abs(elev) * 4) * 0.8;
+  sky.lerpColors(nightSky, daySky, day).lerp(duskSky, dusk * day);
+  scene.background = sky; scene.fog.color.copy(sky);
+  scene.fog.far = 18 + day * 52;
+  sun.intensity = day * 1.2;
+  hemi.intensity = 0.14 + day * 0.8;
+}
+
+function updateFires(dt, t) {
+  for (const f of fires) {
+    f.fuel -= dt;
+    const life = THREE.MathUtils.clamp(f.fuel / 30, 0, 1);
+    const flick = 0.85 + Math.sin(t * 17 + f.g.id) * 0.08 + Math.sin(t * 29) * 0.07;
+    f.light.intensity = 9 * life * flick;
+    f.flame.scale.set(1, flick * life + 0.01, 1);
+    f.flame.visible = life > 0;
+  }
+}
+
+function updateTreeShake(dt) {
+  for (let i = 0; i < trees.length; i++) {
+    const t = trees[i]; if (t.shake <= 0 || t.felled) continue;
+    t.shake = Math.max(0, t.shake - dt);
+    setTree(i, Math.sin(t.shake * 60) * t.shake * 0.08);
+  }
+}
+
+// ---------- main loop ----------
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
+  chopCooldown = Math.max(0, chopCooldown - dt);
+  if (renderer.xr.isPresenting) updateVR(dt); else updateDesktop(dt);
+  collide(); pickupLogs(); updateDayNight(dt); updateFires(dt, t); updateTreeShake(dt);
+  if (state.msgT > 0 && (state.msgT -= dt) <= 0) state.msg = '';
+  updateHud();
+  renderer.render(scene, camera);
+});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+window.__game = { state, trees, rig, tryHit };
+</script>
+</body>
+</html>

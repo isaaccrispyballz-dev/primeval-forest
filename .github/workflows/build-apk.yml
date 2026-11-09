@@ -1,0 +1,77 @@
+name: Build Quest APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: "4.3"
+  VENDORS_VERSION: "3.0.0"
+
+permissions:
+  contents: write   # lets the build publish the APK as a release
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Move Godot templates and settings into this job's home
+        run: |
+          mkdir -p ~/.local/share/godot/export_templates ~/.config
+          mv /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          mv /root/.config/godot ~/.config/godot
+
+      - name: Add the Godot OpenXR vendors plugin (Meta Quest loader)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apt-get update -qq && apt-get install -y -qq unzip curl > /dev/null
+          url=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/GodotVR/godot_openxr_vendors/releases/tags/${VENDORS_VERSION} \
+            | grep -o '"browser_download_url": *"[^"]*\.zip"' | head -1 | cut -d'"' -f4)
+          echo "Downloading $url"
+          curl -sSL -o /tmp/vendors.zip "$url"
+          unzip -q /tmp/vendors.zip -d /tmp/vendors
+          src=$(find /tmp/vendors -type d -name godotopenxrvendors | head -1)
+          mkdir -p addons && cp -r "$src" addons/
+
+      - name: Install the Android build template
+        run: |
+          mkdir -p android/build
+          unzip -q ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/android_source.zip -d android/build
+          echo "${GODOT_VERSION}.stable" > android/.build_version
+          touch android/build/.gdignore
+
+      - name: Create a debug signing key
+        run: |
+          keytool -genkeypair -v -keystore /tmp/debug.keystore -storepass android -alias androiddebugkey \
+            -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Export APK
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: /tmp/debug.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+        run: |
+          mkdir -p build
+          godot --headless --import || true
+          godot --headless --export-debug "Quest" build/lanternwood.apk
+          ls -la build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lanternwood-apk
+          path: build/lanternwood.apk
+
+      # A release gives a direct .apk link you can open in the Quest browser (no zip to unpack)
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Lanternwood build ${{ github.run_number }}
+          files: build/lanternwood.apk
+          make_latest: true
